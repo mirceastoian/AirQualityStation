@@ -1,8 +1,8 @@
-#if !(ESP8266 || ESP32)
-  #error This code is intended to run on the ESP8266/ESP32 platform only.
+#if !ESP8266
+  #error This code is intended to run on the ESP8266 platform only.
 #endif
 
-/* Based on Plantower PMS5003T sensor */ 
+/* Based on Plantower PMS5003T sensor and WeMos D1 Mini Pro board */ 
 
 #include <Wire.h>
 #include <SoftwareSerial.h>
@@ -11,9 +11,11 @@
 
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
+#include <ESP8266mDNS.h>
+#include <ArduinoOTA.h>
+
 #include <WiFiUdp.h>
 #include <NTPClient.h>
-
 #include <Timezone.h>
 #include <TimeLib.h>
 
@@ -80,36 +82,38 @@ const int PM25_STANDARD_HIGH_THRESHOLD = 110; // very high is above
 const int ALARM_BEEPS = 2; // How many beeps when threshold is reached
 
 // MariaDB
-IPAddress mariadb_server(192, 168, 1, 250);
-uint16_t server_port           = 3306;
-char default_database[]        = "AirQualityStation01";
+IPAddress mariaDbServer(192, 168, 55, 200);
+uint16_t dbServerPort = 3306;
+char defaultDatabase[] = "AirQualityStation01";
 char default_telemetry_table[] = "telemetry";
-char default_log_table[]       = "log";
-char db_user[]                 = "***";
-char db_password[]             = "***";
-MySQL_Connection mdb_conn((Client *)&client);
-MySQL_Query *query_mem;
+char defaultLogTable[] = "log";
+char dbUser[] = "***";
+char dbPassword[] = "***";
+MySQL_Connection mariaDbConnection((Client *)&client);
+MySQL_Query *mariaDbQuery;
 
 // Logging
-String log_buffer = "";
+String logBuffer = "";
 const bool SAVE_LOG_TO_DB = true;
 const int LOG_BUFFER_LIMIT = 32768;
-bool error_while_saving_log_to_db = false;
+bool errorWhileSavingLogToDb = false;
 
 // WiFi
-String device_hostname = "AirQualityStation01";
-char wifissid[] = "***";
-char wifipass[] = "***";
+String deviceHostname = "AirQualityStation01";
+char wifiSsid[] = "homewifi";
+char wifiPassword[] = "***";
+char otaPassword[] = "***";
 bool isWifiOn = false;
 bool connectOnlyWhenSaving = true;
 int wifiConnectionFailedCount = 0;
 // Connection retry limit: 1 minute
 const int WIFI_DELAY = 2000;
 const int WIFI_MAX_RETRY_COUNT = 30;
+const int RESET_THRESHOLD = 5;
 
 // Values from https://www.intuitibits.com/2016/03/23/dbm-to-percent-conversion/
-int signal_dBM[] = { -100, -99, -98, -97, -96, -95, -94, -93, -92, -91, -90, -89, -88, -87, -86, -85, -84, -83, -82, -81, -80, -79, -78, -77, -76, -75, -74, -73, -72, -71, -70, -69, -68, -67, -66, -65, -64, -63, -62, -61, -60, -59, -58, -57, -56, -55, -54, -53, -52, -51, -50, -49, -48, -47, -46, -45, -44, -43, -42, -41, -40, -39, -38, -37, -36, -35, -34, -33, -32, -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1};
-int signal_percent[] = {0, 0, 0, 0, 0, 0, 4, 6, 8, 11, 13, 15, 17, 19, 21, 23, 26, 28, 30, 32, 34, 35, 37, 39, 41, 43, 45, 46, 48, 50, 52, 53, 55, 56, 58, 59, 61, 62, 64, 65, 67, 68, 69, 71, 72, 73, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 90, 91, 92, 93, 93, 94, 95, 95, 96, 96, 97, 97, 98, 98, 99, 99, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100};
+int wifiSignaldBM[] = { -100, -99, -98, -97, -96, -95, -94, -93, -92, -91, -90, -89, -88, -87, -86, -85, -84, -83, -82, -81, -80, -79, -78, -77, -76, -75, -74, -73, -72, -71, -70, -69, -68, -67, -66, -65, -64, -63, -62, -61, -60, -59, -58, -57, -56, -55, -54, -53, -52, -51, -50, -49, -48, -47, -46, -45, -44, -43, -42, -41, -40, -39, -38, -37, -36, -35, -34, -33, -32, -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16, -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1};
+int wifiSignalPercent[] = {0, 0, 0, 0, 0, 0, 4, 6, 8, 11, 13, 15, 17, 19, 21, 23, 26, 28, 30, 32, 34, 35, 37, 39, 41, 43, 45, 46, 48, 50, 52, 53, 55, 56, 58, 59, 61, 62, 64, 65, 67, 68, 69, 71, 72, 73, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 90, 91, 92, 93, 93, 94, 95, 95, 96, 96, 97, 97, 98, 98, 99, 99, 99, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100};
 int signalStrength = 0;
 int signalStrengthPercentage = 0;
 
@@ -120,11 +124,9 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", GTMOffset*60*60, 60000);
 TimeChangeRule EEST = {"EEST", Last, Sun, Mar, 3, 180};    // Eastern European Summer Time
 TimeChangeRule EET = {"EET ", Last, Sun, Oct, 4, 120};     // Eastern European (Standard) Time
 Timezone EE_TZ(EEST, EET);
-// String weekDays[7] = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"};
-// String months[12] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
 
 // Emojis for CAQI levels 
-const unsigned char image_verylow[] PROGMEM =
+const unsigned char IMAGE_VERY_LOW[] PROGMEM =
 {
   0x00, 0x00, 0x1f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x03, 0xf8, 0x1f, 
   0xe0, 0x00, 0x00, 0x0f, 0x80, 0x01, 0xf0, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x78, 
@@ -146,7 +148,7 @@ const unsigned char image_verylow[] PROGMEM =
   0xfc, 0x1f, 0xc0, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xf0, 0x00, 0x00
 };
 
-const unsigned char image_low[] PROGMEM =
+const unsigned char IMAGE_LOW[] PROGMEM =
 {	0x00, 0x00, 0x1f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x07, 0xf8, 0x1f, 
   0xc0, 0x00, 0x00, 0x0f, 0x80, 0x01, 0xf0, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x7c, 0x00, 0x00, 0x78, 
   0x00, 0x00, 0x1e, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x07, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x03, 0x80, 
@@ -167,7 +169,7 @@ const unsigned char image_low[] PROGMEM =
   0xf8, 0x3f, 0xc0, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xf0, 0x00, 0x00
 };
 
-const unsigned char image_medium[] PROGMEM =
+const unsigned char IMAGE_MEDIUM[] PROGMEM =
 {	0x00, 0x00, 0x1f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x07, 0xf0, 0x0f, 
   0xe0, 0x00, 0x00, 0x1f, 0x80, 0x01, 0xf0, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x70, 
   0x00, 0x00, 0x1e, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x07, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x03, 0x80, 
@@ -188,7 +190,7 @@ const unsigned char image_medium[] PROGMEM =
   0xf8, 0x1f, 0xe0, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xf8, 0x00, 0x00
 };
 
-const unsigned char image_high[] PROGMEM =
+const unsigned char IMAGE_HIGH[] PROGMEM =
 {	0x00, 0x00, 0x1f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x07, 0xf8, 0x1f, 
   0xe0, 0x00, 0x00, 0x0f, 0x80, 0x01, 0xf0, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x78, 
   0x00, 0x00, 0x1e, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x07, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x03, 0x80, 
@@ -209,7 +211,7 @@ const unsigned char image_high[] PROGMEM =
   0xf8, 0x1f, 0xc0, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xf0, 0x00, 0x00
 };
 
-const unsigned char image_veryhigh[] PROGMEM =
+const unsigned char IMAGE_VERY_HIGH[] PROGMEM =
 {	0x00, 0x00, 0x0f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x03, 0xfc, 0x3f, 
   0xc0, 0x00, 0x00, 0x0f, 0x80, 0x01, 0xf0, 0x00, 0x00, 0x3e, 0x00, 0x00, 0x7c, 0x00, 0x00, 0x78, 
   0x00, 0x00, 0x1e, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x07, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x03, 0x80, 
@@ -230,10 +232,9 @@ const unsigned char image_veryhigh[] PROGMEM =
   0xf8, 0x1f, 0xe0, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xf8, 0x00, 0x00
 };
 
-/*
- * Input time in epoch format and return tm time format
- * by Renzo Mischianti <www.mischianti.org> 
- */
+const unsigned long RESTART_TIME = 24 * 60 * 60000UL;
+
+
 tm getDateTimeByParams(long time)
 {
     struct tm *newtime;
@@ -243,10 +244,6 @@ tm getDateTimeByParams(long time)
     return *newtime;
 }
 
-/*
- * Input tm time format and return String with format pattern
- * by Renzo Mischianti <www.mischianti.org>
- */
 String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d.%m.%Y %H:%M:%S")
 {
   char buffer[30];
@@ -254,11 +251,7 @@ String getDateTimeStringByParams(tm *newtime, char* pattern = (char *)"%d.%m.%Y 
 
   return buffer;
 }
- 
-/*
- * Input time in epoch format format and return String with format pattern
- * by Renzo Mischianti <www.mischianti.org> 
- */
+
 String getEpochStringByParams(long time, char* pattern = (char *)"%d.%m.%Y %H:%M:%S")
 {
   tm newtime;
@@ -269,44 +262,10 @@ String getEpochStringByParams(long time, char* pattern = (char *)"%d.%m.%Y %H:%M
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
-
-  WiFi.mode(WIFI_STA);
-  // Known not to work, instead reconnect on status change
-  // WiFi.setAutoReconnect(true);
-  // WiFi.persistent(true);
-
-  connect_to_wifi();
-  // Getting time via NTP
-  if (isWifiOn)
-  {
-    timeClient.begin();
-    delay(1000);
-    if (timeClient.forceUpdate())
-    {
-      if (__DEBUG) Serial.println(F("Adjusting to local time..."));
-      setTime(timeClient.getEpochTime());
-
-      if (__DEBUG)
-      {
-        Serial.print(F("Current Date & Time: "));
-        Serial.println(getEpochStringByParams(EE_TZ.toLocal(now())));
-      }
-    }
-    else
-    {
-      write_to_log(F("NTP update failed at setup. Retrying later."));
-    }
-
-    delay(1000);
-  }
-  else
-  {
-    write_to_log(F("Unable connecting to WiFi for NTP sync."));
-  }
 
   if(!oled.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
   {
@@ -320,13 +279,59 @@ void setup()
     oled.clearDisplay();
   }
 
+  WiFi.mode(WIFI_STA);
+  WiFi.hostname(deviceHostname.c_str());
   delay(1000);
-  beep();
 
-  write_to_log(F("Air Quality Station start sequence completed."));
+  timeClient.begin();
+  delay(1000);
+
+  connectToWifi();
+  if (isWifiOn) determineWifiSignal();
+
+  ArduinoOTA.setHostname(deviceHostname.c_str());
+  ArduinoOTA.setPassword(otaPassword);
+
+  ArduinoOTA.onStart([]()
+  {
+    String otaType = (ArduinoOTA.getCommand() == U_FLASH) ? F("sketch") : F("filesystem");
+    if (__DEBUG) Serial.println(F("OTA: start updating ") + otaType);
+  });
+  
+  ArduinoOTA.onEnd([]()
+  {
+    if (__DEBUG) Serial.println("OTA ended.");
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+  {
+    if (__DEBUG) Serial.printf("OTA progress: %u%%\r", (progress / (total / 100)));
+  });
+
+  ArduinoOTA.onError([](ota_error_t error)
+  {
+    if (__DEBUG)
+    {
+      Serial.printf("OTA error[%u]: ", error);
+
+      if (error == OTA_AUTH_ERROR) Serial.println(F("Authentication Failed"));
+      else if (error == OTA_BEGIN_ERROR) Serial.println(F("Begin Failed"));
+      else if (error == OTA_CONNECT_ERROR) Serial.println(F("Connect Failed"));
+      else if (error == OTA_RECEIVE_ERROR) Serial.println(F("Receive Failed"));
+      else if (error == OTA_END_ERROR) Serial.println(F("End Failed"));
+    }
+  });
+
+  ArduinoOTA.begin();
+  writeToLog(F("OTA is enabled."));
+
+  delay(1000);
+  // beep();
+
+  writeToLog(F("Air Quality Station start sequence completed."));
 }
 
-bool read_particle_sensor()
+bool readParticleSensor()
 {
   pmsSerial.begin(9600);
   bool dataRead = false;
@@ -430,7 +435,7 @@ bool read_particle_sensor()
           if (dataReadCount > DATA_READ_COUNT_LIMIT)
           {
             dataReadCount = 1;
-            write_to_log(F("Data read count limit was reached and reset."));
+            writeToLog(F("Data read count limit was reached and reset."));
           }
 
           dataRead = true;
@@ -446,7 +451,7 @@ bool read_particle_sensor()
   return (checksum == dataFrame.checksum);
 }
 
-void display_data()
+void displayTelemetryData()
 {
   oled.clearDisplay();
 
@@ -479,7 +484,7 @@ void display_data()
 
     // Air Quality Index (AQI) PM2.5 average for the past 24 hours
     oled.setCursor(0, 56);
-    oled.print(String(F("AQI PM2.5: ")) + String(get_pm25_24h_average()) + String(F(" ug/m3")));
+    oled.print(String(F("AQI PM2.5: ")) + String(getPm2524hAverage()) + String(F(" ug/m3")));
   }
   else if (displayPage == 1)
   {
@@ -487,27 +492,27 @@ void display_data()
     oled.setTextColor(WHITE);
 
     oled.setCursor(0, 2);
-    oled.print(String(F("AQI PM2.5: ")) + String(get_pm25_24h_average()) + String(F(" ug/m3")));
+    oled.print(String(F("AQI PM2.5: ")) + String(getPm2524hAverage()) + String(F(" ug/m3")));
 
     if (dataFrame.pm25_standard <= PM25_STANDARD_VERY_LOW_THRESHOLD)
     {
-      oled.drawBitmap(40, 16, image_verylow, 48, 48, WHITE);
+      oled.drawBitmap(40, 16, IMAGE_VERY_LOW, 48, 48, WHITE);
     }
     else if (dataFrame.pm25_standard > PM25_STANDARD_VERY_LOW_THRESHOLD && dataFrame.pm25_standard <= PM25_STANDARD_LOW_THRESHOLD)
     {
-      oled.drawBitmap(40, 16, image_low, 48, 48, WHITE);
+      oled.drawBitmap(40, 16, IMAGE_LOW, 48, 48, WHITE);
     }
     else if (dataFrame.pm25_standard > PM25_STANDARD_LOW_THRESHOLD && dataFrame.pm25_standard <= PM25_STANDARD_MEDIUM_THRESHOLD)
     {
-      oled.drawBitmap(40, 16, image_medium, 48, 48, WHITE);
+      oled.drawBitmap(40, 16, IMAGE_MEDIUM, 48, 48, WHITE);
     }
     else if (dataFrame.pm25_standard > PM25_STANDARD_MEDIUM_THRESHOLD && dataFrame.pm25_standard <= PM25_STANDARD_HIGH_THRESHOLD)
     {
-      oled.drawBitmap(40, 16, image_high, 48, 48, WHITE);
+      oled.drawBitmap(40, 16, IMAGE_HIGH, 48, 48, WHITE);
     }
     else if (dataFrame.pm25_standard > PM25_STANDARD_HIGH_THRESHOLD)
     {
-      oled.drawBitmap(40, 16, image_veryhigh, 48, 48, WHITE);
+      oled.drawBitmap(40, 16, IMAGE_VERY_HIGH, 48, 48, WHITE);
     }
   }
   else if (displayPage == 2)
@@ -567,7 +572,7 @@ void display_data()
   if (displayPage < 2) displayPage++; else displayPage = 0;
 }
 
-int get_pm25_24h_average()
+int getPm2524hAverage()
 {
   int sum = 0;
   int queueSize = isQueueFilled ? (86400 / REFRESH_DELAY_IN_SECONDS) : queuePosition;
@@ -577,16 +582,16 @@ int get_pm25_24h_average()
   return sum / queueSize;
 }
 
-void save_data_to_db()
+void saveDataToDb()
 {
   if (isWifiOn)
   {
     signalStrength = WiFi.RSSI();
     for (int x = 0; x < 100; x = x + 1)
     {
-      if (signal_dBM[x] == signalStrength)
+      if (wifiSignaldBM[x] == signalStrength)
       {
-        signalStrengthPercentage = signal_percent[x];
+        signalStrengthPercentage = wifiSignalPercent[x];
 
         if (__DEBUG)
         {
@@ -599,12 +604,12 @@ void save_data_to_db()
     }
 
     // Save values to MariaDB
-    if (mdb_conn.connectNonBlocking(mariadb_server, server_port, db_user, db_password) != RESULT_FAIL)
+    if (mariaDbConnection.connectNonBlocking(mariaDbServer, dbServerPort, dbUser, dbPassword) != RESULT_FAIL)
     {
       delay(500);
 
-      String insert_readings_query =
-        String(F("INSERT INTO ")) + default_database + "." + default_telemetry_table +
+      String insertReadingsQuery =
+        String(F("INSERT INTO ")) + defaultDatabase + "." + default_telemetry_table +
         F(" (pm10_standard, pm25_standard, pm100_standard, pm10_env, pm25_env, pm100_env, ") +
         F("particles_03um, particles_05um, particles_10um, particles_25um, ") +
         F("temperature, humidity, wifi_signalstrength_p) VALUES (") +
@@ -623,113 +628,96 @@ void save_data_to_db()
         String(signalStrengthPercentage) +
         ")";
 
-      MySQL_Query query_mem = MySQL_Query(&mdb_conn);
+      MySQL_Query mariaDbQuery = MySQL_Query(&mariaDbConnection);
 
-      if (mdb_conn.connected())
+      if (mariaDbConnection.connected())
       {
-        if (!query_mem.execute(insert_readings_query.c_str()))
+        if (!mariaDbQuery.execute(insertReadingsQuery.c_str()))
         {
-          write_to_log(F("Query execution failed. Cannot save sensor data.\n") + insert_readings_query);
+          writeToLog(F("Query execution failed. Cannot save sensor data.\n") + insertReadingsQuery);
         }
 
-        if (SAVE_LOG_TO_DB && log_buffer != "")
+        if (SAVE_LOG_TO_DB && logBuffer != "")
         {
-          MySQL_Query query_mem = MySQL_Query(&mdb_conn);
+          MySQL_Query mariaDbQuery = MySQL_Query(&mariaDbConnection);
 
-          if (wifiConnectionFailedCount > 0) log_buffer += F("\nWiFi connection failure count: ") + String(wifiConnectionFailedCount);
+          if (wifiConnectionFailedCount > 0) logBuffer += F("\nWiFi connection failure count: ") + String(wifiConnectionFailedCount);
           
           String insert_log_query =
-            String(F("INSERT INTO ")) + default_database + "." + default_log_table +
-            F(" (message) VALUES ('") + log_buffer + "')";
+            String(F("INSERT INTO ")) + defaultDatabase + "." + defaultLogTable +
+            F(" (message) VALUES ('") + logBuffer + "')";
 
-          if (!query_mem.execute(insert_log_query.c_str()))
+          if (!mariaDbQuery.execute(insert_log_query.c_str()))
           {
-            write_to_log(F("Saving log buffer failed."));
-            error_while_saving_log_to_db = true;
+            writeToLog(F("Saving log buffer failed."));
+            errorWhileSavingLogToDb = true;
           }
           else
           {
-            log_buffer = "";
-            error_while_saving_log_to_db = false;
+            logBuffer = "";
+            errorWhileSavingLogToDb = false;
           }
         }
-        
       }
       else
       {
-        write_to_log(F("Disconnected from MariaDB server. Cannot save sensor data."));
+        writeToLog(F("Disconnected from MariaDB server. Cannot save sensor data."));
       }
 
       delay(500);
-      mdb_conn.close();
+      mariaDbConnection.close();
     } 
     else 
     {
-      write_to_log(F("Unable connecting to MariaDB."));
+      writeToLog(F("Unable connecting to MariaDB."));
     }
 
     delay(500);
   }
   else
   {
-    write_to_log(F("No active WiFi connection to save sensor data. Retrying."));
+    writeToLog(F("No active WiFi connection to save sensor data. Retrying."));
   }
 }
 
 void loop()
 {
   isWifiOn = (WiFi.status() == WL_CONNECTED);
-  if (!isWifiOn) connect_to_wifi();
-
-  if (!read_particle_sensor())
-  {
-    write_to_log(F("Invalid checksum."));
-  }
+  if (!isWifiOn)
+    connectToWifi();
   else
+    determineWifiSignal();
+
+  const unsigned long timeToRunBeforeSampling = REFRESH_DELAY_IN_SECONDS * 1000UL;
+  static unsigned long lastSamplingTime = 0 - timeToRunBeforeSampling;
+
+  if (millis() - lastSamplingTime >= timeToRunBeforeSampling)
   {
-    pm25Queue[queuePosition] = dataFrame.pm25_standard;
-    queuePosition++;
+    lastSamplingTime += timeToRunBeforeSampling;
 
-    if (queuePosition == 86400 / REFRESH_DELAY_IN_SECONDS)
+    if (!readParticleSensor())
     {
-      queuePosition = 0;
-      isQueueFilled = true;
-    }
-
-    if (timeClient.forceUpdate())
-    {
-      delay(1000);
-      setTime(timeClient.getEpochTime());
+      writeToLog(F("Invalid checksum."));
     }
     else
     {
-      if (__DEBUG) Serial.println(F("NTP update failed at runtime. Retrying later."));
-    }
-
-    if (timeClient.isTimeSet()) // timeClient initializes to 10:00:00 if it does not receive an NTP packet before the 100ms timeout.
-    {
-      const time_t current = EE_TZ.toLocal(now());
-      struct tm *ptm = localtime((time_t *) &current);
-
-      if ((ptm->tm_hour >= DISPLAY_OFF_HOUR_START) || (ptm->tm_hour < DISPLAY_OFF_HOUR_END))
+      pm25Queue[queuePosition] = dataFrame.pm25_standard;
+      queuePosition++;
+  
+      if (queuePosition == 86400 / REFRESH_DELAY_IN_SECONDS)
       {
-        oled.clearDisplay();
-        oled.display();
+        queuePosition = 0;
+        isQueueFilled = true;
       }
-      else
-      {
-        display_data();
-      }
+  
+      displayTelemetryData();
+      saveDataToDb();
     }
-    else
-    {
-      display_data();
-    }
-    
-    save_data_to_db();
   }
 
-  delay(REFRESH_DELAY_IN_SECONDS * 1000);
+  ArduinoOTA.handle();
+
+  if (millis() >= RESTART_TIME) ESP.restart();
 }
 
 void beep()
@@ -739,14 +727,14 @@ void beep()
   digitalWrite(BUZZER_PIN, LOW);
 }
 
-void connect_to_wifi()
+void connectToWifi()
 {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
 
-  WiFi.hostname(device_hostname.c_str());
-  WiFi.begin(wifissid, wifipass);
+  WiFi.hostname(deviceHostname.c_str());
+  WiFi.begin(wifiSsid, wifiPassword);
   if (__DEBUG) Serial.print(F("Connecting to WiFi..."));
 
   int wifiRetryCount = 0;
@@ -765,12 +753,26 @@ void connect_to_wifi()
     if (__DEBUG)
     {
       Serial.print(F("\nConnected to: "));
-      Serial.println(wifissid);
+      Serial.println(wifiSsid);
       Serial.print(F("IP address: "));
       Serial.println(WiFi.localIP());
     }
 
-    timeClient.update();
+    if (timeClient.forceUpdate())
+    {
+      if (__DEBUG) Serial.println(F("Adjusting to local time..."));
+      setTime(timeClient.getEpochTime());
+
+      if (__DEBUG)
+      {
+        Serial.print(F("Current Date & Time: "));
+        Serial.println(getEpochStringByParams(EE_TZ.toLocal(now())));
+      }
+    }
+    else
+    {
+      writeToLog(F("NTP update failed at setup. Retrying later."));
+    }
 
     wifiConnectionFailedCount = 0;
   }
@@ -779,17 +781,35 @@ void connect_to_wifi()
     WiFi.disconnect(); // Stop trying
     wifiConnectionFailedCount++;
 
+    if (wifiConnectionFailedCount == RESET_THRESHOLD)
+    {
+      if (__DEBUG) Serial.println(F("Rebooting..."));
+      ESP.restart();
+    }
+
     if (__DEBUG) Serial.println();
-    write_to_log(F("Unable connecting to WiFi."));
+    writeToLog(F("Unable connecting to WiFi."));
   }
 }
 
-void write_to_log(String message)
+void determineWifiSignal()
 {
-  // When log buffer exceeds the set limit and cannot be saved in the database stop logging
-  if ((log_buffer.length() + message.length() <= LOG_BUFFER_LIMIT) && !error_while_saving_log_to_db)
+  signalStrength = WiFi.RSSI();
+  for (int x = 0; x < 100; x = x + 1)
   {
-    log_buffer += String(log_buffer != "" ? "\n" : "") + "[" + getEpochStringByParams(EE_TZ.toLocal(now())) + "] " + message;
+    if (wifiSignaldBM[x] == signalStrength)
+    {
+      signalStrengthPercentage = wifiSignalPercent[x];
+      break;
+    }
+  }
+}
+
+void writeToLog(String message)
+{
+  if ((logBuffer.length() + message.length() <= LOG_BUFFER_LIMIT) && !errorWhileSavingLogToDb)
+  {
+    logBuffer += String(logBuffer != "" ? "\n" : "") + "[" + getEpochStringByParams(EE_TZ.toLocal(now())) + "] " + message;
   }
 
   if (__DEBUG) Serial.println(message);
@@ -807,3 +827,5 @@ DONE 8. Automatic summer time adjustment
 9. Show on screen with large text size PM2.5 info?
 DONE 10. Log too big.
 */
+
+// EOF
