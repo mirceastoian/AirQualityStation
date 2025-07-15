@@ -709,8 +709,27 @@ void loop()
         queuePosition = 0;
         isQueueFilled = true;
       }
+
+      if (timeClient.isTimeSet()) // timeClient initializes to 10:00:00 if it does not receive an NTP packet before the 100ms timeout.
+      {
+        const time_t current = EE_TZ.toLocal(now());
+        struct tm *ptm = localtime((time_t *) &current);
   
-      displayTelemetryData();
+        if ((ptm->tm_hour >= DISPLAY_OFF_HOUR_START) || (ptm->tm_hour < DISPLAY_OFF_HOUR_END))
+        {
+          oled.clearDisplay();
+          oled.display();
+        }
+        else
+        {
+          displayTelemetryData();
+        }
+      }
+      else
+      {
+        displayTelemetryData();
+      }
+      
       saveDataToDb();
     }
   }
